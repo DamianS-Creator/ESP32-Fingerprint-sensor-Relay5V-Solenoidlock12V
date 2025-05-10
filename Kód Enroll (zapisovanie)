@@ -1,0 +1,108 @@
+#include <Adafruit_Fingerprint.h>
+#include <HardwareSerial.h>
+#include <FS.h>
+#include <SPIFFS.h>
+
+HardwareSerial mySerial(1);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
+
+uint8_t id;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // Inicializuj SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("❌ Chyba pri spúšťaní SPIFFS");
+    return;
+  }
+
+  mySerial.begin(57600, SERIAL_8N1, 16, 17);
+  Serial.println("🔍 Hľadám fingerprint senzor...");
+  finger.begin(57600);
+
+  if (finger.verifyPassword()) {
+    Serial.println("✅ Senzor nájdený!");
+  } else {
+    Serial.println("❌ Senzor sa nenašiel :(");
+    while (1);
+  }
+
+  finger.getParameters();
+}
+
+void loop() {
+  Serial.println("Zadaj ID (1–127), pod ktorým chceš uložiť odtlačok:");
+  while (!Serial.available());
+  id = Serial.parseInt();
+  Serial.read();  // Vyčisti serial buffer
+
+  if (id == 0 || id > 127) {
+    Serial.println("❌ Neplatné ID!");
+    return;
+  }
+
+  Serial.println("Zadaj meno a priezvisko:");
+  String meno = "";
+  while (meno.length() < 1) {
+    while (Serial.available()) {
+      meno = Serial.readStringUntil('\n');
+      meno.trim();
+    }
+  }
+
+  if (getFingerprintEnroll() == FINGERPRINT_OK) {
+    saveNameToFile(id, meno);
+  }
+}
+
+void saveNameToFile(uint8_t id, String meno) {
+  File file = SPIFFS.open("/users.txt", FILE_APPEND);
+  if (!file) {
+    Serial.println("❌ Nepodarilo sa otvoriť súbor na zápis");
+    return;
+  }
+
+  file.printf("%d:%s\n", id, meno.c_str());
+  file.close();
+  Serial.println("✅ Meno uložené!");
+}
+
+uint8_t getFingerprintEnroll() {
+  int p = -1;
+  Serial.println("👉 Prilož prst...");
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    if (p == FINGERPRINT_NOFINGER) continue;
+    if (p == FINGERPRINT_OK) Serial.println("📸 Odtlačok zachytený!");
+    else Serial.println("⚠️ Chyba pri skenovaní.");
+  }
+
+  p = finger.image2Tz(1);
+  if (p != FINGERPRINT_OK) return p;
+
+  Serial.println("✋ Odstráň prst...");
+  delay(2000);
+  while (finger.getImage() != FINGERPRINT_NOFINGER);
+
+  Serial.println("👉 Znovu prilož rovnaký prst...");
+  p = -1;
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    if (p == FINGERPRINT_NOFINGER) continue;
+    if (p == FINGERPRINT_OK) Serial.println("📸 Znovu zachytený!");
+  }
+
+  p = finger.image2Tz(2);
+  if (p != FINGERPRINT_OK) return p;
+
+  p = finger.createModel();
+  if (p != FINGERPRINT_OK) return p;
+
+  p = finger.storeModel(id);
+  if (p == FINGERPRINT_OK) Serial.println("✅ Odtlačok uložený!");
+  else Serial.println("❌ Nepodarilo sa uložiť odtlačok.");
+
+  return p;
+}
