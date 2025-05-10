@@ -1,0 +1,179 @@
+#define BLYNK_TEMPLATE_ID "Your BLYNK template ID"
+#define BLYNK_TEMPLATE_NAME "Your BLYNK template name"
+
+#include <Adafruit_Fingerprint.h>
+#include <HardwareSerial.h>
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <TimeLib.h>
+#include <WidgetRTC.h>
+#include <FS.h>
+#include <SPIFFS.h>
+
+// Wi-Fi a Blynk
+char ssid[] = "Your wi-fi";
+char pass[] = "Your wi-fi password";
+char auth[] = "Your authorization BLYNK code";
+// Fingerprint
+HardwareSerial mySerial(1);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
+
+// RTC modul
+WidgetRTC rtc;
+
+// Zámok
+#define ZAMOK_PIN 25
+bool zamokAktivny = false;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // Inicializácia SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("❌ SPIFFS sa nespustil!");
+  } else {
+    Serial.println("✅ SPIFFS inicializovaný.");
+  }
+
+  mySerial.begin(57600, SERIAL_8N1, 16, 17);
+  finger.begin(57600);
+  delay(5);
+
+  if (finger.verifyPassword()) {
+    Serial.println("✅ Senzor odtlačkov prstov nájdený!");
+  } else {
+    Serial.println("❌ Senzor sa nenašiel :(");
+    while (1) delay(1);
+  }
+
+  finger.getTemplateCount();
+
+  WiFi.begin(ssid, pass);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("✅ Wi-Fi pripojené");
+
+  Blynk.begin(auth, ssid, pass);
+  rtc.begin();
+
+  Blynk.virtualWrite(V1, "Priložte prst");
+
+  pinMode(ZAMOK_PIN, OUTPUT);
+  digitalWrite(ZAMOK_PIN, LOW); // Zámok vypnutý na začiatku
+}
+
+void loop() {
+  Blynk.run();
+
+  if (finger.getImage() == FINGERPRINT_OK) {
+    verifyFingerprint();
+  }
+
+  delay(100);
+}
+
+void verifyFingerprint() {
+  uint8_t p = finger.image2Tz();
+  if (p != FINGERPRINT_OK) return;
+
+  p = finger.fingerSearch();
+  if (p == FINGERPRINT_OK) {
+    int id = finger.fingerID;
+    String meno = getNameFromFile(id);
+
+    // Formátovaný čas a dátum
+    String cas = String(hour()) + ":" + (minute() < 10 ? "0" : "") + String(minute());
+    String datum = (day() < 10 ? "0" : "") + String(day()) + "." +
+                   (month() < 10 ? "0" : "") + String(month()) + "." +
+                   String(year());
+
+    // Log do V3
+    String log = "ID: " + String(id) + "-" + meno + " | " + datum + " | " + cas;
+    Blynk.virtualWrite(V3, log);
+
+    // Zobrazenie na V1: Vitaj meno
+    Blynk.virtualWrite(V1, "Vitaj " + meno);
+
+    // ✅ Otvorenie zámku na 3 sekundy
+    digitalWrite(ZAMOK_PIN, HIGH);
+    zamokAktivny = true;
+    Serial.println("🔓 Zámok otvorený (otlačok)");
+    delay(3000);
+    digitalWrite(ZAMOK_PIN, LOW);
+    zamokAktivny = false;
+    Serial.println("🔒 Zámok zatvorený (automaticky)");
+
+    Blynk.virtualWrite(V1, "Priložte prst");
+
+  } else if (p == FINGERPRINT_NOTFOUND) {
+    Serial.println("❌ Odtlačok nebol rozpoznaný.");
+    Blynk.virtualWrite(V1, "Odtlačok nesedí");
+    delay(2000);
+    Blynk.virtualWrite(V1, "Priložte prst");
+  } else {
+    Serial.println("⚠️ Chyba pri vyhľadávaní odtlačku.");
+    Blynk.virtualWrite(V1, "Chyba pri overovaní");
+    delay(2000);
+    Blynk.virtualWrite(V1, "Priložte prst");
+  }
+
+  // Čaká, kým sa prst odstráni
+  while (finger.getImage() != FINGERPRINT_NOFINGER) {
+    delay(50);
+  }
+}
+
+BLYNK_WRITE(V2) {
+  int stav = param.asInt();  // 1 = zapnuté, 0 = vypnuté
+
+  if (stav == 1) {
+    digitalWrite(ZAMOK_PIN, HIGH);
+    zamokAktivny = true;
+    Serial.println("🔓 Zámok otvorený (z Blynk)");
+  } else {
+    digitalWrite(ZAMOK_PIN, LOW);
+    zamokAktivny = false;
+    Serial.println("🔒 Zámok zatvorený (z Blynk)");
+  }
+}
+
+// ✅ Funkcia na uloženie mena do SPIFFS (napr. pri enrollovaní)
+void saveNameToFile(uint8_t id, String meno) {
+  File file = SPIFFS.open("/users.txt", FILE_APPEND);
+  if (!file) {
+    Serial.println("❌ Nepodarilo sa otvoriť súbor na zápis.");
+    return;
+  }
+  file.printf("%d:%s\n", id, meno.c_str());
+  file.close();
+  Serial.println("✅ Meno uložené.");
+}
+
+// ✅ Funkcia na načítanie mena zo súboru podľa ID
+String getNameFromFile(uint8_t id) {
+  File file = SPIFFS.open("/users.txt", FILE_READ);
+  if (!file) {
+    Serial.println("❌ Súbor neexistuje.");
+    return "Neznámy";
+  }
+
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    int delim = line.indexOf(':');
+    if (delim > 0) {
+      int fileId = line.substring(0, delim).toInt();
+      String name = line.substring(delim + 1);
+      name.trim();
+      if (fileId == id) {
+        file.close();
+        return name;
+      }
+    }
+  }
+
+  file.close();
+  return "Neznámy";
+}
